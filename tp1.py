@@ -1,4 +1,4 @@
-# %%
+#%%
 # -*- coding: utf-8 -*-
 # Disciplina: Tópicos em Engenharia de Controle e Automação IV (ENG075): 
 # Fundamentos de Veículos Autônomos - 2024/1
@@ -10,46 +10,72 @@
 
 import class_car as cp
 import numpy as np
-import cv2
 import matplotlib.pyplot as plt
 
 plt.figure(1)
 plt.ion()
 
 ########################################
-# cria comunicação com o carrinho
+# Cria comunicação com o carrinho
 car = cp.CarCoppelia()
-v_ref = 1
-fr_ant = 0
-# começa a simulação
+v_ref = 1.0  # Velocidade de referência inicial
+
+# Começa a simulação
 car.startMission()
 
-u_vec = [0]
-sum_err = 0
-u = 0
+# Lista para armazenar o erro de orientação ao longo do tempo
+th_err_list = []
+
+# Modo de trajetória
+modo_trajetoria = 'straight'  # Pode ser 'straight' ou 'circle'
+modo_controle = 'stanley'  # Modo de controle: 'on-off' ou 'stanley'
 
 # Posição e orientação iniciais
 x0, y0 = car.p
 th0 = car.th
 
-# Modo de trajetória
-modo_trajetoria = 'circle'  # Modo apenas para trajetória reta
-modo_controle = 'stanley'  # Modo de controle: 'on-off' ou 'stanley'
+# Referência de orientação inicial para a trajetória reta
+th_ref = th0  # Inicialmente a mesma orientação que o carro
 
 # Definir tipos de trajetórias
 def trajectory_straight(car):
-    # Definir a trajetória em linha reta com deslocamento em y
-    x_ref = x0 + 10  # Trajetória em linha reta com deslocamento em x
-    y_ref = 4  # Posição fixa em y
-    return x_ref, y_ref
+    # Parâmetros da reta
+    x_start = x0
+    y_start = y0
+    x_end = x0 + 20  # Comprimento da reta em x
+    
+    # Coeficientes da equação da reta ax + by + c = 0
+    A = y_end - y_start
+    B = -(x_end - x_start)
+    C = x_end * y_start - y_end * x_start
+    
+    # Gerar um linspace ao longo da reta y = y0 com comprimento 20 em x
+    num_points = 200
+    x_ref = np.linspace(x_start, x_end, num_points)
+    y_ref = (-A * x_ref - C) / B  # Calcular y para cada x usando a equação da reta
+    
+    # Encontrar o ponto mais próximo na trajetória
+    nearest_index = np.argmin(np.abs(car.p[0] - x_ref))
+    
+    return x_ref[nearest_index], y_ref[nearest_index]
 
 def trajectory_circle(car):
-    # Trajetória circular (não usada neste modo)
-    radius = 2  # raio do círculo (ajustável)
-    angular_speed = 0.1  # velocidade angular (ajustável)
-    x_ref = x0 + radius * np.cos(angular_speed * car.t)
-    y_ref = y0 + radius * np.sin(angular_speed * car.t)
-    return x_ref, y_ref
+    # Trajetória circular contínua
+    radius = 1  # Raio do círculo (ajustável)
+    angular_speed = 0.5  # Velocidade angular (ajustável)
+    
+    # Posição inicial como centro do círculo
+    x_center, y_center = x0, y0
+    
+    # Calcular o ângulo desejado para o controle Stanley
+    angle_ref = th0 + angular_speed * car.t
+    
+    # Calcular a posição de referência usando a equação paramétrica do círculo
+    x_ref = x_center + radius * np.cos(angle_ref)
+    y_ref = y_center + radius * np.sin(angle_ref)
+    
+    return x_ref, y_ref, angle_ref
+
 
 # Escolha a trajetória desejada
 if modo_trajetoria == 'straight':
@@ -59,78 +85,111 @@ elif modo_trajetoria == 'circle':
 else:
     raise ValueError("Modo de trajetória inválido. Escolha 'straight' ou 'circle'.")
 
-while car.t < 18:
-    # lê senores
+while car.t < 36:
+    # Lê sensores e atualiza estado do carro
     car.step()
 
     # Definir posição de referência
-    x_ref, y_ref = trajectory_func(car)
+    if modo_trajetoria == 'circle':
+        x_ref, y_ref, angle_ref = trajectory_func(car)
+    else:
+        x_ref, y_ref = trajectory_func(car)
 
     # Calcular referência de orientação
     th_ref = np.arctan2(y_ref - car.p[1], x_ref - car.p[0])
 
+    # Restringir th_ref ao intervalo de -pi a pi
+    th_ref = np.mod(th_ref, 2 * np.pi)
+    if th_ref > np.pi:
+        th_ref -= 2 * np.pi
+
     # Escolha do controlador
     if modo_controle == 'on-off':
-        # Controlador lateral on-off
+        # Controlador lateral on-off com histerese mínima
         th_err = th_ref - car.th
-        if th_err > np.deg2rad(5):  # Se erro for maior que 5 graus
-            steer_cmd = np.deg2rad(20.0)
-        elif th_err < -np.deg2rad(5):  # Se erro for menor que -5 graus
+
+        # Calcular crosstrack error como a distância perpendicular à trajetória
+        if modo_trajetoria == 'straight':
+            # Para trajetória reta, calcular a distância perpendicular entre o carro (car.p) e a trajetória (x_ref, y_ref)
+            x_start = x0
+            y_start = y0
+            x_end = x0 + 20
+            y_end = y0
+
+            # Fórmula da distância ponto a linha
+            A = y_end - y_start
+            B = -(x_end - x_start)
+            C = x_end * y_start - y_end * x_start
+            denom = np.sqrt(A**2 + B**2)
+            if denom != 0:
+                cross_track_error = (A * car.p[0] + B * car.p[1] + C) / denom
+            else:
+                cross_track_error = 0
+
+        elif modo_trajetoria == 'circle':
+            # Para trajetória circular, crosstrack error é ajustado conforme a trajetória circular
+            cross_track_error = (car.p[0] - x_ref) * np.cos(np.pi/2 + th0) + (car.p[1] - y_ref) * np.sin(np.pi/2 + th0)
+
+        if cross_track_error > 0.1:  # Histerese mínima para evitar oscilações próximas ao zero
             steer_cmd = -np.deg2rad(20.0)
+        elif cross_track_error < -0.1:
+            steer_cmd = np.deg2rad(20.0)
         else:
-            steer_cmd = 0  # Não estercar
+            steer_cmd = 0  # Não esterçar
+
     elif modo_controle == 'stanley':
         # Controlador Stanley
-        k_e = 0.5  # Ganho de controle lateral
-        k_v = 0.8  # Ganho de controle longitudinal
+        k_e = 1.0  # Ganho de controle lateral 
+        k_v = 0.5  # Ganho de controle longitudinal 
 
         # Erro de orientação
-        th_err = th_ref - car.th
+        th_err = th_ref - car.th     
 
-        # Erro lateral
-        lateral_err = np.cross([np.cos(car.th), np.sin(car.th)], [x_ref - car.p[0], y_ref - car.p[1]])
+        # Calcular crosstrack error baseado na trajetória específica
+        if modo_trajetoria == 'straight':
+            # Para trajetória reta, calcular a distância perpendicular entre o carro (car.p) e a trajetória (x_ref, y_ref)
+            x_start = x0
+            y_start = y0
+            x_end = x0 + 20
+            y_end = y0
+
+            # Fórmula da distância ponto a linha
+            A = y_end - y_start
+            B = -(x_end - x_start)
+            C = x_end * y_start - y_end * x_start
+            denom = np.sqrt(A**2 + B**2)
+            if denom != 0:
+                cross_track_error = abs(A * car.p[0] + B * car.p[1] + C) / denom
+            else:
+                cross_track_error = 0
+        elif modo_trajetoria == 'circle':
+            cross_track_error = (car.p[0] - x_ref) * np.cos(angle_ref) + (car.p[1] - y_ref) * np.sin(angle_ref)
 
         # Ângulo de referência para o controle Stanley
-        delta = th_err + np.arctan2(k_e * lateral_err, k_v * (v_ref - car.v))
+        delta = th_err + np.arctan2(k_e * cross_track_error, k_v * (v_ref - car.v))
 
-        # Limitar o ângulo de esterçamento
-        steer_cmd = np.clip(delta, -np.deg2rad(30.0), np.deg2rad(30.0))
+        # Limitar o ângulo de esterçamento baseado no erro de orientação e no crosstrack error
+        if np.abs(th_err) > np.deg2rad(20):
+            steer_cmd = np.deg2rad(20.0) * np.sign(th_err)
+        else:
+            steer_cmd = np.clip(delta, -np.deg2rad(20.0), np.deg2rad(20.0))
 
     else:
         raise ValueError("Modo de controle inválido. Escolha 'on-off' ou 'stanley'.")
 
-    # Aplica o comando de esterçamento
+    # Aplicar o comando de esterçamento
     car.setSteer(steer_cmd)
     
-    # Lei de controle
-    err = (v_ref - car.v)
-    if u < 0.5 or u > 0:
-        sum_err += err
-    u = 0.5*(err + 0.05*sum_err/2.5)
+    # Setar velocidade constante
+    car.setVel(v_ref)
 
-    car.setU(u)
-    # pega imagem
+    # Obter imagem
     image = car.getImage()
-    u_vec.append(u)
 
-    t = [traj['t'] for traj in car.traj]
-    v = [traj['v'] for traj in car.traj]
+    # Armazenar o erro de orientação para análise posterior
+    th_err_list.append(th_err)
 
 car.stopMission()
 print('Terminou...')
-
-# %%
-plt.plot(t, u_vec)
-plt.ylabel("u[m/s^2]")
-plt.xlabel("t[s]")
-plt.grid()
-plt.savefig('u.pdf', format='pdf', bbox_inches='tight')
-# %%
-plt.plot(t, v)
-plt.ylabel("v[m/s]")
-plt.xlabel("t[s]")
-plt.grid()
-plt.savefig('v.pdf', format='pdf', bbox_inches='tight')
-# %%
 
 # %%
